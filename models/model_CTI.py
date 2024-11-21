@@ -649,20 +649,20 @@ class model_WSSS():
         gt = torch.eye(C).cuda().unsqueeze(0).expand(B, C, C)
         return F.cross_entropy(logits, gt)
         
+    # delete
+    # def get_contrast_loss_deprecated(self, ctk):
+    #     loss = 0
+    #     ctk = ctk[self.contrast_idx]
+    #     ctk = ctk[:,1:,:] #except background
+    #     B, C, H = ctk.shape
         
-    def get_contrast_loss_deprecated(self, ctk):
-        loss = 0
-        ctk = ctk[self.contrast_idx]
-        ctk = ctk[:,1:,:] #except background
-        B, C, H = ctk.shape
-        
-        ctk_global = torch.zeros((C,384)).cuda()
-        for i in range(C):
-            ctk_global[i] += torch.stack(self.ctk_global[i], dim=0).mean(0)
+    #     ctk_global = torch.zeros((C,384)).cuda()
+    #     for i in range(C):
+    #         ctk_global[i] += torch.stack(self.ctk_global[i], dim=0).mean(0)
             
-        for i in range(B):
-            cos_sim = F.cosine_similarity(ctk[i], ctk_global.detach())
-            cos_sim_pos = cos_sim * self.label[i]
-            loss += -torch.log(cos_sim_pos.sum() / (cos_sim.sum() + 1e-6))
-        return loss
+    #     for i in range(B):
+    #         cos_sim = F.cosine_similarity(ctk[i], ctk_global.detach())
+    #         cos_sim_pos = cos_sim * self.label[i]
+    #         loss += -torch.log(cos_sim_pos.sum() / (cos_sim.sum() + 1e-6))
+    #     return loss
 
