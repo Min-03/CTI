@@ -226,6 +226,13 @@ class model_WSSS():
         self.noise_weight = args.noise_weight
         self.contrast_idx = args.contrast_idx
         
+        self.loss_cls_prev = None
+        self.loss_bg_prev = None
+        self.loss_ctk_swap_intra_prev = None
+        self.loss_ctk_swap_cross_prev = None
+        self.loss_names_prev = [ln + "_prev" for ln in self.loss_names]
+        self.cnt_cls_dominant = 0
+        
 
     # Save networks
     def save_model(self, epo, ckpt_path):
@@ -343,7 +350,8 @@ class model_WSSS():
         ctk_pos = outputs_pos['ctk']
         ####################################################################
 
-        warmup_epoch=-1 if C==20 else 1
+        # warmup_epoch=-1 if C==20 else 1
+        warmup_epoch = -1
 
         self.loss_cls = 1*(
             F.multilabel_soft_margin_loss(self.out,self.label)
@@ -374,11 +382,11 @@ class model_WSSS():
 
         if self.args.W[0]>0 and epo>warmup_epoch:
             
-            self.loss_bg = self.args.W[0]*(
+            self.loss_bg = (
                 ((1-_rcams_fg)-_rcams_bg).abs().mean() 
             )
 
-            loss_trm += self.loss_bg
+            loss_trm += self.args.W[0] * self.loss_bg
         else:
             self.loss_bg = torch.Tensor([0])[0]
 
@@ -415,11 +423,11 @@ class model_WSSS():
 
             cams_swap_INTRA = outputs_swap_INTRA['cams'] if self.noise_weight < 0 else outputs_pos['cams']
 
-            self.loss_ctk_swap_intra = self.args.W[1]*(
+            self.loss_ctk_swap_intra = (
                 ((self.max_norm(cams)-self.max_norm(cams_swap_INTRA))).abs().mean()
             )
 
-            loss_trm += self.loss_ctk_swap_intra
+            loss_trm += self.args.W[1] * self.loss_ctk_swap_intra
         else:
             self.loss_ctk_swap_intra = torch.Tensor([0])[0]
 
@@ -470,12 +478,12 @@ class model_WSSS():
 
             fcams_as_swap_CROSS = outputs_swap_CROSS['fcams_as']
 
-            self.loss_ctk_swap_cross = self.args.W[2]*(
+            self.loss_ctk_swap_cross = (
                 ((self.max_norm(cams)[:,1:,:,:]-self.max_norm(fcams_as_swap_CROSS)[:,1:,:,:])).abs().mean()
             )
 
             if valid == self.num_class:
-                loss_trm += self.loss_ctk_swap_cross
+                loss_trm += self.args.W[2] * self.loss_ctk_swap_cross
         else:
             self.loss_ctk_swap_cross = torch.Tensor([0])[0]
             
@@ -489,13 +497,12 @@ class model_WSSS():
             else:
                 self.loss_feature_contrast = torch.Tensor([0])[0]
         
-
         loss_trm.backward()
-
-        self.opt_trm.step()
         
+        self.opt_trm.step()
         ################################################### Export ###################################################
-
+        if self.args.threshold != -1:
+            self.grad_schedule()
 
         for i in range(len(self.loss_names)):
             self.running_loss[i] += getattr(self, self.loss_names[i]).item()
@@ -648,6 +655,27 @@ class model_WSSS():
         # sim /= temp
         gt = torch.eye(C).cuda().unsqueeze(0).expand(B, C, C)
         return F.cross_entropy(logits, gt)
+    
+    def grad_schedule(self):
+        if self.loss_cls_prev is None:
+            return
+        grad = []
+        for i in range(len(self.loss_names)):
+            grad.append(-getattr(self, self.loss_names[i]).item())
+        for i in range(len(self.loss_names_prev)):
+            grad[i] += getattr(self, self.loss_names_prev[i]).item()
+            grad[i] /= getattr(self, self.loss_names_prev[i]).item()
+        if max(range(len(self.loss_names)), key=lambda i: grad[i]) == 0:
+            self.cnt_cls_dominant += 1
+        for i in range(len(self.loss_names_prev)):
+            loss = getattr(self, self.loss_names[i])
+            setattr(self, self.loss_names_prev[i], loss)
+        
+    
+    def set_schedule(self, epo, threshold):
+        if self.cnt_cls_dominant > threshold:
+            self.args.W = [utils.cosine_ascent(w, self.args.magnitude, epo, self.args.epochs) for w in self.args.W_init]
+        self.cnt_cls_dominant = 0
         
     # delete
     # def get_contrast_loss_deprecated(self, ctk):
