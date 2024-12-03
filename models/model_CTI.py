@@ -220,11 +220,15 @@ class model_WSSS():
         self.thre_cross = args.thre_cross
         self.avg_intra = 0
         self.avg_cross = 0
-        self.cnt = 0
         self.avg_weight = args.avg_weight
+        self.avg_weight_df = 0.9
         self.mem = 30
         self.noise_weight = args.noise_weight
+        self.bank_noise_weight = args.bank_noise_weight
         self.contrast_idx = args.contrast_idx
+        self.is_dynamic_thre = args.set_dynamic_thre
+        self.cnts_per_class = torch.zeros(self.num_class, requires_grad=False).to(self.dev)
+        self.noise_mask = torch.zeros(self.num_class, requires_grad=False).to(self.dev)
         
         self.loss_cls_prev = None
         self.loss_bg_prev = None
@@ -416,7 +420,7 @@ class model_WSSS():
                 self.update_avg(cosine_sim)
                 
             cosine_sim = F.cosine_similarity(swap_ctk, swap_ctk_pos, dim=2).detach()
-            self.avg_intra = self.avg_weight * self.avg_intra + (1 - self.avg_weight) * cosine_sim.mean()
+            self.avg_intra = self.avg_weight_df * self.avg_intra + (1 - self.avg_weight_df) * cosine_sim.mean()
             
             if self.noise_weight < 0:
                 outputs_swap_INTRA = self.net_trm(self.img, swap_ctk_pos, swap_idx)
@@ -436,6 +440,7 @@ class model_WSSS():
         if self.args.W[2] > 0 and epo > warmup_epoch: 
 
             swap_ctk = ctk[swap_idx][:,1:,:].clone().detach()
+            self.cnts_per_class += self.label.sum(dim=0)
 
             for _b, _c in torch.nonzero(self.label):
                 input = F.layer_norm(ctk[swap_idx][_b, 1+_c, :].detach().unsqueeze(0), [384]).squeeze(0)
@@ -454,7 +459,8 @@ class model_WSSS():
 
             for i in range(C):
                 if len(self.ctk_global[i]) > 0:
-                    ctk_global_tensor[i] += torch.stack(self.ctk_global[i], dim=0).mean(0)
+                    ctk_global = torch.stack(self.ctk_global[i], dim=0).mean(0)
+                    ctk_global_tensor[i] += ctk_global + self.bank_noise_weight * self.noise_mask[i] * ctk_global.std().detach()
 
             swap_idx = -1
             if self.thre_cross > 0:
@@ -469,7 +475,7 @@ class model_WSSS():
                 
             cosine_sim = F.cosine_similarity(ctk[swap_idx][:,1:,], ctk_global_tensor, dim=2).detach()
             cosine_sim *= self.label
-            self.avg_cross = self.avg_weight * self.avg_cross + (1 - self.avg_weight) * (cosine_sim.sum() / self.label.sum())
+            self.avg_cross = self.avg_weight_df * self.avg_cross + (1 - self.avg_weight_df) * (cosine_sim.sum() / self.label.sum())
             
             swap_ctk = (ctk[swap_idx][:,1:,:] * (1-self.label.view(B,C,1)) +
                         ctk_global_tensor * self.label.view(B,C,1))
@@ -486,6 +492,9 @@ class model_WSSS():
                 loss_trm += self.args.W[2] * self.loss_ctk_swap_cross
         else:
             self.loss_ctk_swap_cross = torch.Tensor([0])[0]
+            
+        if self.is_dynamic_thre:
+            self.set_dynamic_thre()
             
             
         ##################### feature contrast #####################
@@ -677,6 +686,10 @@ class model_WSSS():
             self.args.W = [utils.cosine_ascent(w, self.args.magnitude, epo, self.args.epochs) for w in self.args.W_init]
         self.cnt_cls_dominant = 0
         
+    def set_noise_mask(self, tail_thre):
+        self.noise_mask += (self.cnts_per_class < tail_thre)
+            
+        
     # delete
     # def get_contrast_loss_deprecated(self, ctk):
     #     loss = 0
@@ -693,4 +706,3 @@ class model_WSSS():
     #         cos_sim_pos = cos_sim * self.label[i]
     #         loss += -torch.log(cos_sim_pos.sum() / (cos_sim.sum() + 1e-6))
     #     return loss
-
