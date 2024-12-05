@@ -113,10 +113,11 @@ class model_WSSS():
 
         # Model attributes
         self.net_names = ['net_trm']
-        if args.contrast_idx == -1:
-            self.base_names = ['cls','bg','ctk_swap_intra','ctk_swap_cross']
-        else:
-            self.base_names = ['cls','bg','ctk_swap_intra','ctk_swap_cross', 'feature_contrast']
+        self.base_names = ['cls','bg','ctk_swap_intra','ctk_swap_cross']
+        if args.contrast_idx != -1:
+            self.base_names.append('feature_contrast')
+        if args.competitive_weight > 0:
+            self.base_names.append('competitive')
         self.loss_names = ['loss_' + bn for bn in self.base_names]
         self.acc_names = ['acc_' + bn for bn in self.base_names]
 
@@ -371,14 +372,17 @@ class model_WSSS():
             fcams_fg = (mtatt*cams)[:,1:,:,:]*self.label.view(B,C,1,1) #for PASCAL
         else:
             fcams_fg = (mtatt*cams.detach())[:,1:,:,:]*self.label.view(B,C,1,1) #for COCO
-        fcams_fg = torch.max(fcams_fg,dim=1)[0].view(B,1,h,w)
+        fcams_fg_max = torch.max(fcams_fg,dim=1)[0].view(B,1,h,w)
+        fcams_fg_nonmax = (torch.sum(fcams_fg, dim=1).view(B,1,h,w) - fcams_fg_max) / (C - 1) #(B,1,H,W)
         fcams_bg = (fcams[:,0,:,:].view(B,1,h,w))
 
-        rcams_fg = torch.matmul(patch_attn.unsqueeze(1).double(), fcams_fg.double().view(fcams_fg.shape[0],fcams_fg.shape[1], -1, 1)).reshape(fcams_fg.shape[0],fcams_fg.shape[1], h, w) #(B 1 N2 N2) * (B,20,N2,1)
+        rcams_fg = torch.matmul(patch_attn.unsqueeze(1).double(), fcams_fg_max.double().view(fcams_fg_max.shape[0],fcams_fg_max.shape[1], -1, 1)).reshape(fcams_fg_max.shape[0],fcams_fg_max.shape[1], h, w) #(B 1 N2 N2) * (B,20,N2,1)
+        rcams_fg_nonmax = torch.matmul(patch_attn.unsqueeze(1).double(), fcams_fg_nonmax.double().view(fcams_fg_nonmax.shape[0],fcams_fg_nonmax.shape[1], -1, 1)).reshape(fcams_fg_nonmax.shape[0],fcams_fg_nonmax.shape[1], h, w) #(B 1 N2 N2) * (B,20,N2,1)
 
         rcams_bg = torch.matmul(patch_attn.unsqueeze(1).double(), fcams_bg.double().view(fcams_bg.shape[0],fcams_bg.shape[1], -1, 1)).reshape(fcams_bg.shape[0],fcams_bg.shape[1], h, w) #(B 1 N2 N2) * (B,20,N2,1)
         
         _rcams_fg = self.max_norm(rcams_fg)
+        _rcams_fg_nonmax = self.max_norm(rcams_fg_nonmax)
         _rcams_bg = self.max_norm(rcams_bg)
         
         self.rcams_fg = F.interpolate(_rcams_fg,size=self.img.size()[2:],mode='bilinear',align_corners=False)
@@ -412,7 +416,7 @@ class model_WSSS():
             swap_ctk = ctk[swap_idx]
 
 
-            #code for dynamic masked fusion
+            #code for masked fusion
             if self.avg_weight > 0:
                 cosine_sim = F.cosine_similarity(swap_ctk, swap_ctk_pos, dim=2).detach()
                 mask = (cosine_sim > self.avg).unsqueeze(2).detach()
@@ -505,6 +509,11 @@ class model_WSSS():
                 loss_trm += 0.1 * self.loss_feature_contrast
             else:
                 self.loss_feature_contrast = torch.Tensor([0])[0]
+                
+        ##################### competitive loss #####################
+        if self.args.competitive_weight > 0:
+            self.loss_competitive = (1 - _rcams_fg + self.args.competitive_weight * _rcams_fg_nonmax).mean()
+            loss_trm += self.loss_competitive
         
         loss_trm.backward()
         
