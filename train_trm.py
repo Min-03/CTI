@@ -157,15 +157,19 @@ if __name__ == '__main__':
     parser.add_argument('--finetune', default='https://dl.fbaipublicfiles.com/deit/deit_small_patch16_224-cd65a155.pth1', help='finetune from checkpoint')    
     
     ############################added############################
-    parser.add_argument("--thre_intra", type=float, default=-1.0) #negative means not applying these methods.                    
+    parser.add_argument("--thre_intra", type=float, default=-1.0) #negative means not applying these methods.
     parser.add_argument("--thre_cross", type=float, default=-1.0)
     parser.add_argument("--avg_weight", type=float, default=-1.0)
     parser.add_argument("--magnitude", type=float, default=-1.0)
+    parser.add_argument("--threshold", type=int, default=-1)
     parser.add_argument("--add_ctk", action="store_true")
     parser.add_argument("--set_dynamic_thre", action="store_true")
     parser.add_argument("--W_init", default=[0.1, 1.0, 1.0], nargs='+', type=float)
     parser.add_argument("--noise_weight", type=float, default=-1.0)
     parser.add_argument("--contrast_idx", type=int, default=-1)
+    parser.add_argument("--bank_noise_weight", type=float, default=-1.0)
+    parser.add_argument("--tail_thre", type=int, default=-1)
+    parser.add_argument("--competitive_weight", type=float, default=-1.0)
                         
     
 
@@ -251,7 +255,7 @@ if __name__ == '__main__':
     max_miou = 0
     for epo in range(args.epochs):
         if args.magnitude > 0:
-            args.W = [utils.cosine_ascent(w, args.magnitude, epo, args.epochs) for w in args.W_init]
+            model.set_schedule(epo, args.threshold)
         epo_str = str(epo).zfill(3)
 
         # # Train
@@ -270,6 +274,8 @@ if __name__ == '__main__':
             model.add_ctk()
         if args.set_dynamic_thre:
             model.set_dynamic_thre()
+        if epo == 0 and args.bank_noise_weight != -1:
+            model.set_noise_mask(1e5 if args.tail_thre == -1 else args.tail_thre)
         logger.info('Epoch ' + epo_str + ' model is saved!')
         model.save_model(epo, ckpt_path)
       
