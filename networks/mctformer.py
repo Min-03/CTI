@@ -63,7 +63,7 @@ class MCTformerV2_CTI(VisionTransformer):
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return patch_pos_embed
     
-    def forward_features(self, x, swap_ctk=None, swap_idx=6, noise_weight=-1.0):
+    def forward_features(self, x, swap_ctk=None, swap_idx=6, noise_weight=-1.0, fuse_factor=0.5):
         B, nc, w, h = x.shape
         x = self.patch_embed(x)
 
@@ -100,9 +100,9 @@ class MCTformerV2_CTI(VisionTransformer):
                     ctk = x[:, :self.num_classes_with_fg]
                     swap_ctk = ctk.clone() + noise_weight * torch.randn_like(ctk.detach()) * ctk.std().detach()
                 if swap_ctk.size(1) == self.num_classes_with_fg:
-                    x[:, :self.num_classes_with_fg] =  (x[:, :self.num_classes_with_fg] + swap_ctk)/2    # FG # swap token with fg token
+                    x[:, :self.num_classes_with_fg] =  fuse_factor * x[:, :self.num_classes_with_fg] + (1 - fuse_factor) * swap_ctk    # FG # swap token with fg token
                 elif swap_ctk.size(1) == self.num_classes:
-                    x[:, 1:self.num_classes_with_fg] =  (x[:, 1:self.num_classes_with_fg] + swap_ctk)/2    # FG # swap token with fg token
+                    x[:, 1:self.num_classes_with_fg] =  fuse_factor * x[:, 1:self.num_classes_with_fg] + (1 - fuse_factor) * swap_ctk    # FG # swap token with fg token
                 x, weights_i,qkv, _ = blk(x)
                 attn_weights.append(weights_i)
                 ctk_list.append(x[:, 0:self.num_classes_with_fg])
@@ -116,12 +116,12 @@ class MCTformerV2_CTI(VisionTransformer):
 
         return x[:, 0:self.num_classes_with_fg], x[:, self.num_classes_with_fg:], attn_weights , ctk_list, query_list
 
-    def forward(self, x, ctk=None, swap_idx=None, return_att=False, n_layers=6, noise_weight=-1.0):  # FG input ctk doesn't include fg token
+    def forward(self, x, ctk=None, swap_idx=None, return_att=False, n_layers=6, noise_weight=-1.0, fuse_factor=0.5):  # FG input ctk doesn't include fg token
         w, h = x.shape[2:]
         if ctk == None:
-            x_cls, x_patch, attn_weights, ctk_list, query_list = self.forward_features(x, noise_weight=noise_weight)
+            x_cls, x_patch, attn_weights, ctk_list, query_list = self.forward_features(x, noise_weight=noise_weight, fuse_factor=fuse_factor)
         else: 
-            x_cls, x_patch, attn_weights, ctk_list, query_list = self.forward_features(x,ctk,swap_idx)
+            x_cls, x_patch, attn_weights, ctk_list, query_list = self.forward_features(x,ctk,swap_idx, fuse_factor=fuse_factor)
 
         n, p, c = x_patch.shape
 

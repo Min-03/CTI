@@ -228,6 +228,7 @@ class model_WSSS():
         self.bank_noise_weight = args.bank_noise_weight
         self.contrast_idx = args.contrast_idx
         self.is_dynamic_thre = args.set_dynamic_thre
+        self.adaptive_fuse = args.adaptive_fuse
         self.cnts_per_class = torch.zeros(self.num_class, requires_grad=False).to(self.dev)
         self.noise_mask = torch.zeros(self.num_class, requires_grad=False).to(self.dev)
         
@@ -399,46 +400,6 @@ class model_WSSS():
             self.loss_bg = torch.Tensor([0])[0]
 
         self.loss_cls_bg = torch.Tensor([0])[0]
-
-
-        ##################INTRA#########################
-        if self.args.W[1]>0 and epo>warmup_epoch:
-            swap_idx = -1
-            if self.thre_intra > 0:
-                for i in range(12):
-                    cosine_sim = F.cosine_similarity(ctk[i], ctk_pos[i], dim=2).detach()
-                    if cosine_sim.mean() < self.thre_intra:
-                        break
-                    swap_idx = i
-            else:
-                swap_idx = 3
-            swap_ctk_pos = ctk_pos[swap_idx] #BEST
-            swap_ctk = ctk[swap_idx]
-
-
-            #code for masked fusion
-            if self.avg_weight > 0:
-                cosine_sim = F.cosine_similarity(swap_ctk, swap_ctk_pos, dim=2).detach()
-                mask = (cosine_sim > self.avg).unsqueeze(2).detach()
-                swap_ctk_pos = mask * swap_ctk_pos + ~mask * swap_ctk
-                self.update_avg(cosine_sim)
-                
-            cosine_sim = F.cosine_similarity(swap_ctk, swap_ctk_pos, dim=2).detach()
-            self.avg_intra = self.avg_weight_df * self.avg_intra + (1 - self.avg_weight_df) * cosine_sim.mean()
-            
-            if self.noise_weight < 0:
-                outputs_swap_INTRA = self.net_trm(self.img, swap_ctk_pos, swap_idx)
-
-            cams_swap_INTRA = outputs_swap_INTRA['cams'] if self.noise_weight < 0 else outputs_pos['cams']
-
-            self.loss_ctk_swap_intra = (
-                ((self.max_norm(cams)-self.max_norm(cams_swap_INTRA))).abs().mean()
-            )
-
-            loss_trm += self.args.W[1] * self.loss_ctk_swap_intra
-        else:
-            self.loss_ctk_swap_intra = torch.Tensor([0])[0]
-
         
         ###################CROSS###################
         if self.args.W[2] > 0 and epo > warmup_epoch: 
@@ -496,11 +457,58 @@ class model_WSSS():
                 loss_trm += self.args.W[2] * self.loss_ctk_swap_cross
         else:
             self.loss_ctk_swap_cross = torch.Tensor([0])[0]
-            
+
         if self.is_dynamic_thre:
             self.set_dynamic_thre()
             
+        ##################INTRA#########################
+        if self.args.W[1]>0 and epo>warmup_epoch:
+            swap_idx = -1
+            if self.thre_intra > 0:
+                for i in range(12):
+                    cosine_sim = F.cosine_similarity(ctk[i], ctk_pos[i], dim=2).detach()
+                    if cosine_sim.mean() < self.thre_intra:
+                        break
+                    swap_idx = i
+            else:
+                swap_idx = 3
+            swap_ctk_pos = ctk_pos[swap_idx] #BEST
+            swap_ctk = ctk[swap_idx]
+
+
+            #code for masked fusion
+            if self.avg_weight > 0:
+                cosine_sim = F.cosine_similarity(swap_ctk, swap_ctk_pos, dim=2).detach()
+                mask = (cosine_sim > self.avg).unsqueeze(2).detach()
+                swap_ctk_pos = mask * swap_ctk_pos + ~mask * swap_ctk
+                self.update_avg(cosine_sim)
+                
+            cosine_sim = F.cosine_similarity(swap_ctk, swap_ctk_pos, dim=2).detach()
+            self.avg_intra = self.avg_weight_df * self.avg_intra + (1 - self.avg_weight_df) * cosine_sim.mean()
             
+            if self.adaptive_fuse and valid == self.num_class:
+                cosine_sim_org = F.cosine_similarity(swap_ctk[:,1:], ctk_global_tensor, dim=2).detach().unsqueeze(2)
+                cosine_sim_pos = F.cosine_similarity(swap_ctk_pos[:,1:], ctk_global_tensor, dim=2).detach().unsqueeze(2)
+                assert cosine_sim_org.shape == cosine_sim_pos.shape and cosine_sim_pos.shape == (B, C, 1)
+                fuse_factor = cosine_sim_org / (cosine_sim_org + cosine_sim_pos)
+                bg_fuse_factor = torch.full((B, 1, 1), 0.5)
+                fuse_factor = torch.cat((bg_fuse_factor, fuse_factor), dim=1)
+            else:
+                fuse_factor = 0.5
+            if self.noise_weight < 0:
+                outputs_swap_INTRA = self.net_trm(self.img, swap_ctk_pos, swap_idx, fuse_factor=fuse_factor)
+
+            cams_swap_INTRA = outputs_swap_INTRA['cams'] if self.noise_weight < 0 else outputs_pos['cams']
+
+            self.loss_ctk_swap_intra = (
+                ((self.max_norm(cams)-self.max_norm(cams_swap_INTRA))).abs().mean()
+            )
+
+            loss_trm += self.args.W[1] * self.loss_ctk_swap_intra
+        else:
+            self.loss_ctk_swap_intra = torch.Tensor([0])[0]
+
+
         ##################### feature contrast #####################
 
         if self.contrast_idx != -1:
@@ -509,11 +517,12 @@ class model_WSSS():
                 loss_trm += 0.1 * self.loss_feature_contrast
             else:
                 self.loss_feature_contrast = torch.Tensor([0])[0]
-                
+
         ##################### competitive loss #####################
         if self.args.competitive_weight > 0:
-            self.loss_competitive = (1 - _rcams_fg + self.args.competitive_weight * _rcams_fg_nonmax).mean()
-            loss_trm += self.loss_competitive
+            preserving_weight = 0.2
+            self.loss_competitive = (preserving_weight - preserving_weight * _rcams_fg + _rcams_fg_nonmax).mean()
+            loss_trm += self.args.competitive_weight * self.loss_competitive
         
         loss_trm.backward()
         
