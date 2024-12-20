@@ -401,34 +401,39 @@ class model_WSSS():
 
         self.loss_cls_bg = torch.Tensor([0])[0]
         
+        ###################Class Bank###################
+        swap_ctk = ctk[swap_idx][:,1:,:].clone().detach()
+        self.cnts_per_class += self.label.sum(dim=0)
+
+        for _b, _c in torch.nonzero(self.label):
+            input = F.layer_norm(ctk[swap_idx][_b, 1+_c, :].detach().unsqueeze(0), [384]).squeeze(0)
+            self.ctk_global[_c].append(input)
+
+        ctk_global_tensor = torch.zeros((C,384)).cuda()
+
+        mem = self.mem # To prevent non-existence of object in random selection
+        valid = 0
+
+
+        for i in range(C):
+            if len(self.ctk_global[i]) >= mem:
+                self.ctk_global[i] = self.ctk_global[i][-mem:]
+                valid += 1
+
+        for i in range(C):
+            if len(self.ctk_global[i]) > 0:
+                ctk_global = torch.stack(self.ctk_global[i], dim=0).mean(0)
+                ctk_global_tensor[i] += ctk_global + self.bank_noise_weight * self.noise_mask[i] * ctk_global.std().detach()
+        
         ###################CROSS###################
-        if self.args.W[2] > 0 and epo > warmup_epoch: 
-
-            swap_ctk = ctk[swap_idx][:,1:,:].clone().detach()
-            self.cnts_per_class += self.label.sum(dim=0)
-
-            for _b, _c in torch.nonzero(self.label):
-                input = F.layer_norm(ctk[swap_idx][_b, 1+_c, :].detach().unsqueeze(0), [384]).squeeze(0)
-                self.ctk_global[_c].append(input)
-
-            ctk_global_tensor = torch.zeros((C,384)).cuda()
-
-            mem = self.mem # To prevent non-existence of object in random selection
-            valid = 0
-
-
-            for i in range(C):
-                if len(self.ctk_global[i]) >= mem:
-                    self.ctk_global[i] = self.ctk_global[i][-mem:]
-                    valid += 1
-
-            for i in range(C):
-                if len(self.ctk_global[i]) > 0:
-                    ctk_global = torch.stack(self.ctk_global[i], dim=0).mean(0)
-                    ctk_global_tensor[i] += ctk_global + self.bank_noise_weight * self.noise_mask[i] * ctk_global.std().detach()
-
-            swap_idx = -1
-            if self.thre_cross > 0:
+        if self.args.W[2] > 0 and epo > warmup_epoch:
+            swap_idx = 1
+            if self.args.dynamic_fuse_overlap:
+                for i in range(12):
+                    if (self.is_overlap(ctk[i][:,1:,], ctk_global_tensor)):
+                        break
+                    swap_idx = i
+            elif self.thre_cross > 0:
                 for i in range(12):
                     cosine_sim = F.cosine_similarity(ctk[i][:,1:,], ctk_global_tensor, dim=2).detach()
                     cosine_sim *= self.label
@@ -464,7 +469,12 @@ class model_WSSS():
         ##################INTRA#########################
         if self.args.W[1]>0 and epo>warmup_epoch:
             swap_idx = -1
-            if self.thre_intra > 0:
+            if self.args.dynamic_fuse_overlap:
+                for i in range(12):
+                    if (self.is_overlap(ctk[i], ctk_pos[i])):
+                        break
+                    swap_idx = i
+            elif self.thre_cross > 0:
                 for i in range(12):
                     cosine_sim = F.cosine_similarity(ctk[i], ctk_pos[i], dim=2).detach()
                     if cosine_sim.mean() < self.thre_intra:
@@ -491,7 +501,7 @@ class model_WSSS():
                 cosine_sim_pos = F.cosine_similarity(swap_ctk_pos[:,1:], ctk_global_tensor, dim=2).detach().unsqueeze(2)
                 assert cosine_sim_org.shape == cosine_sim_pos.shape and cosine_sim_pos.shape == (B, C, 1)
                 fuse_factor = cosine_sim_org / (cosine_sim_org + cosine_sim_pos)
-                bg_fuse_factor = torch.full((B, 1, 1), 0.5)
+                bg_fuse_factor = torch.full((B, 1, 1), 0.5).to(self.dev)
                 fuse_factor = torch.cat((bg_fuse_factor, fuse_factor), dim=1)
             else:
                 fuse_factor = 0.5
@@ -513,7 +523,7 @@ class model_WSSS():
 
         if self.contrast_idx != -1:
             if valid == self.num_class:
-                self.loss_feature_contrast = self.get_contrast_loss(ctk)
+                self.loss_feature_contrast = self.get_contrast_loss(ctk, ctk_global_tensor)
                 loss_trm += 0.1 * self.loss_feature_contrast
             else:
                 self.loss_feature_contrast = torch.Tensor([0])[0]
@@ -667,18 +677,14 @@ class model_WSSS():
         self.thre_cross = self.avg_cross
         self.thre_intra = self.avg_intra
         
-    def get_contrast_loss(self, ctk):
+    def get_contrast_loss(self, ctk, ctk_global):
         ctk = ctk[self.contrast_idx]
         ctk = ctk[:,1:,:] #except background
         B, C, H = ctk.shape
         
-        ctk_global = torch.zeros((C,384)).cuda()
-        for i in range(C):
-            ctk_global[i] += torch.stack(self.ctk_global[i], dim=0).mean(0)
-            
-        ctk = F.normalize(ctk, dim=-1)
-        ctk_global = F.normalize(ctk_global, dim=-1)
-        logits = torch.matmul(ctk.view(-1, H), ctk_global.T).view(B, C, C)
+        ctk_global_norm = F.normalize(ctk_global, dim=-1)
+        ctk_norm = F.normalize(ctk, dim=-1)
+        logits = torch.matmul(ctk_norm.view(-1, H), ctk_global_norm.T).view(B, C, C)
         # sim /= temp
         gt = torch.eye(C).cuda().unsqueeze(0).expand(B, C, C)
         return F.cross_entropy(logits, gt)
@@ -706,6 +712,14 @@ class model_WSSS():
         
     def set_noise_mask(self, tail_thre):
         self.noise_mask += (self.cnts_per_class < tail_thre)
+        
+    def is_overlap(self, ctk1, ctk2):
+        B, C, H = ctk1.shape
+        ctk2_norm = F.normalize(ctk2, dim=-1)
+        ctk1_norm = F.normalize(ctk1, dim=-1)
+        sim = torch.matmul(ctk1_norm, ctk2_norm.transpose(-2, -1)).view(B, C, C).detach()
+        sim_diagonal = sim.diagonal(dim1=1, dim2=2).unsqueeze(-1)
+        return not torch.all(sim_diagonal > sim).item()
             
         
     # delete
