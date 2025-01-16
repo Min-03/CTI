@@ -138,6 +138,7 @@ class model_WSSS():
         self.count = 0
         self.num_count = 0
         
+        #test
         #Tensorboard
         self.global_step = 0
 
