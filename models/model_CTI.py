@@ -123,7 +123,7 @@ class model_WSSS():
 
         self.ebd_memory_t = []
         self.ebd_memory_s = []
-        self.ctk_global = [[] for _ in range(self.args.C)]
+        self.ctk_global = [[[] for _ in range(self.args.C)] for _ in range(12)] #layer specific class bank
 
         self.is_empty_memory = [True for i in range(len(self.categories))]
 
@@ -406,37 +406,42 @@ class model_WSSS():
         swap_ctk = ctk[swap_idx][:,1:,:].clone().detach()
         self.cnts_per_class += self.label.sum(dim=0)
 
-        for _b, _c in torch.nonzero(self.label):
-            input = F.layer_norm(ctk[swap_idx][_b, 1+_c, :].detach().unsqueeze(0), [384]).squeeze(0)
-            self.ctk_global[_c].append(input)
+        for i in range(12):
+            for _b, _c in torch.nonzero(self.label):
+                # input = F.layer_norm(ctk[swap_idx][_b, 1+_c, :].detach().unsqueeze(0), [384]).squeeze(0)
+                input = F.layer_norm(ctk[i][_b, 1+_c, :].detach().unsqueeze(0), [384]).squeeze(0)
+                self.ctk_global[i][_c].append(input)
 
-        ctk_global_tensor = torch.zeros((C,384)).cuda()
+        ctk_global_tensor = torch.zeros((12, C, 384)).cuda()
 
         mem = self.mem # To prevent non-existence of object in random selection
-        valid = 0
+        valid = [0] * 12
 
+        for i in range(12):
+            for j in range(C):
+                if len(self.ctk_global[i][j]) >= mem:
+                    self.ctk_global[i][j] = self.ctk_global[i][j][-mem:]
+                    valid[i] += 1
+                if len(self.ctk_global[i][j]) > 0:
+                    ctk_global = torch.stack(self.ctk_global[i][j], dim=0).mean(0)
+                    ctk_global_tensor[i][j] += ctk_global + self.bank_noise_weight * self.noise_mask[j] * ctk_global.std().detach()
 
-        for i in range(C):
-            if len(self.ctk_global[i]) >= mem:
-                self.ctk_global[i] = self.ctk_global[i][-mem:]
-                valid += 1
-
-        for i in range(C):
-            if len(self.ctk_global[i]) > 0:
-                ctk_global = torch.stack(self.ctk_global[i], dim=0).mean(0)
-                ctk_global_tensor[i] += ctk_global + self.bank_noise_weight * self.noise_mask[i] * ctk_global.std().detach()
+        # for i in range(C):
+        #     if len(self.ctk_global[i]) > 0:
+        #         ctk_global = torch.stack(self.ctk_global[i], dim=0).mean(0)
+        #         ctk_global_tensor[i] += ctk_global + self.bank_noise_weight * self.noise_mask[i] * ctk_global.std().detach()
         
         ###################CROSS###################
         if self.args.W[2] > 0 and epo > warmup_epoch:
             swap_idx = -1
             if self.args.dynamic_fuse_overlap:
                 for i in range(12):
-                    if (self.is_overlap(ctk[i][:,1:,], ctk_global_tensor)):
+                    if (self.is_overlap(ctk[i][:,1:,], ctk_global_tensor[i])):
                         break
                     swap_idx = i
             elif self.thre_cross > 0:
                 for i in range(12):
-                    cosine_sim = F.cosine_similarity(ctk[i][:,1:,], ctk_global_tensor, dim=2).detach()
+                    cosine_sim = F.cosine_similarity(ctk[i][:,1:,], ctk_global_tensor[i], dim=2).detach()
                     cosine_sim *= self.label
                     if cosine_sim.sum() / self.label.sum() < self.thre_cross:
                         break
@@ -444,22 +449,24 @@ class model_WSSS():
             else:
                 swap_idx = 3
             
-            cosine_sim = F.cosine_similarity(ctk[swap_idx][:,1:,], ctk_global_tensor, dim=2).detach()
+            cosine_sim = F.cosine_similarity(ctk[swap_idx][:,1:,], ctk_global_tensor[swap_idx], dim=2).detach()
             cosine_sim *= self.label
             self.avg_cross = self.avg_weight_df * self.avg_cross + (1 - self.avg_weight_df) * (cosine_sim.sum() / self.label.sum())
             
             swap_ctk = (ctk[swap_idx][:,1:,:] * (1-self.label.view(B,C,1)) +
-                        ctk_global_tensor * self.label.view(B,C,1))
+                        ctk_global_tensor[swap_idx] * self.label.view(B,C,1))
+            
 
             outputs_swap_CROSS = self.net_trm(self.img, swap_ctk.detach(), swap_idx)
 
             fcams_as_swap_CROSS = outputs_swap_CROSS['fcams_as']
+            
 
             self.loss_ctk_swap_cross = (
                 ((self.max_norm(cams)[:,1:,:,:]-self.max_norm(fcams_as_swap_CROSS)[:,1:,:,:])).abs().mean()
             )
 
-            if valid == self.num_class:
+            if valid[swap_idx] == self.num_class:
                 loss_trm += self.args.W[2] * self.loss_ctk_swap_cross
         else:
             self.loss_ctk_swap_cross = torch.Tensor([0])[0]
@@ -496,9 +503,9 @@ class model_WSSS():
             cosine_sim = F.cosine_similarity(swap_ctk, swap_ctk_pos, dim=2).detach()
             self.avg_intra = self.avg_weight_df * self.avg_intra + (1 - self.avg_weight_df) * cosine_sim.mean()
             
-            if self.adaptive_fuse and valid == self.num_class:
-                cosine_sim_org = F.cosine_similarity(swap_ctk[:,1:], ctk_global_tensor, dim=2).detach().unsqueeze(2)
-                cosine_sim_pos = F.cosine_similarity(swap_ctk_pos[:,1:], ctk_global_tensor, dim=2).detach().unsqueeze(2)
+            if self.adaptive_fuse and valid[swap_idx] == self.num_class:
+                cosine_sim_org = F.cosine_similarity(swap_ctk[:,1:], ctk_global_tensor[swap_idx], dim=2).detach().unsqueeze(2)
+                cosine_sim_pos = F.cosine_similarity(swap_ctk_pos[:,1:], ctk_global_tensor[swap_idx], dim=2).detach().unsqueeze(2)
                 assert cosine_sim_org.shape == cosine_sim_pos.shape and cosine_sim_pos.shape == (B, C, 1)
                 fuse_factor = cosine_sim_org / (cosine_sim_org + cosine_sim_pos)
                 bg_fuse_factor = torch.full((B, 1, 1), 0.5).to(self.dev)
@@ -522,7 +529,7 @@ class model_WSSS():
         ##################### feature contrast #####################
 
         if self.contrast_idx != -1:
-            if valid == self.num_class:
+            if valid[swap_idx] == self.num_class:
                 self.loss_feature_contrast = self.get_contrast_loss(ctk, ctk_global_tensor)
                 loss_trm += 0.1 * self.loss_feature_contrast
             else:
@@ -538,7 +545,7 @@ class model_WSSS():
         
         self.opt_trm.step()
         ################################################### Export ###################################################
-        if self.args.threshold != -1:
+        if self.args.threshold > -1:
             self.grad_schedule()
 
         for i in range(len(self.loss_names)):

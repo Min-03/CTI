@@ -276,7 +276,7 @@ if __name__ == '__main__':
             model.add_ctk()
         if args.set_dynamic_thre:
             model.set_dynamic_thre()
-        if epo == 0 and args.bank_noise_weight != -1:
+        if epo == 0 and args.bank_noise_weight > 0:
             model.set_noise_mask(1e5 if args.tail_thre == -1 else args.tail_thre)
         logger.info('Epoch ' + epo_str + ' model is saved!')
         model.save_model(epo, ckpt_path)
