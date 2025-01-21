@@ -36,6 +36,8 @@ class MCTformerV2_CTI(VisionTransformer):
         self.tokenizer =  nn.Sequential(nn.Linear(384, 384*5),
                                         nn.ReLU(),
                                         nn.Linear(384*5, 384*self.num_classes_with_fg))
+        
+        self.avg = torch.zeros(self.num_classes + 1, requires_grad=False).cuda()
        
         trunc_normal_(self.cls_token, std=.02)
         trunc_normal_(self.pos_embed, std=.02)
@@ -99,7 +101,9 @@ class MCTformerV2_CTI(VisionTransformer):
             if (swap_ctk is not None or not (noise_weight < 0)) and i==(swap_idx + 1): #BE careful for the SWAP IDX
                 if not (noise_weight < 0):
                     ctk = x[:, :self.num_classes_with_fg]
-                    swap_ctk = ctk.clone() + noise_weight * torch.randn_like(ctk.detach()) * ctk.std().detach()
+                    swap_ctk = ctk.clone() + noise_weight * torch.randn_like(ctk.detach()) * ctk.std(dim=2, keepdim=True).detach()
+                    if self.avg_weight > 0:
+                        swap_ctk = self.get_masked_swap_ctk(ctk, swap_ctk)
                 if swap_ctk.size(1) == self.num_classes_with_fg:
                     x[:, :self.num_classes_with_fg] =  fuse_factor * x[:, :self.num_classes_with_fg] + (1 - fuse_factor) * swap_ctk    # FG # swap token with fg token
                 elif swap_ctk.size(1) == self.num_classes:
@@ -149,8 +153,12 @@ class MCTformerV2_CTI(VisionTransformer):
         
         ##########################code for feature noise######################################
         feature_map = F.relu(feature_map)
-
         n, c, h, w = feature_map.shape
+        
+        if self.revise_back:
+            back_attn = attn_weights[-n_layers:].sum(0)[:, 0, self.num_classes_with_fg:].reshape([n, 1, h, w])
+            feature_map = feature_map * (1 - back_attn)
+
 
         mtatt = attn_weights[-n_layers:].sum(0)[:, 0:self.num_classes_with_fg, self.num_classes_with_fg:].reshape([n, c, h, w])
         
@@ -192,6 +200,17 @@ class MCTformerV2_CTI(VisionTransformer):
             return rcams  
         else:
             return outs
+        
+    def get_masked_swap_ctk(self, ctk, swap_ctk):
+        cosine_sim = F.cosine_similarity(ctk, swap_ctk, dim=2).detach()
+        mask = (cosine_sim > self.avg).unsqueeze(2).detach()
+        swap_ctk = mask * swap_ctk + ~mask * ctk
+        self.avg = self.avg_weight * self.avg + (1 - self.avg_weight) * cosine_sim
+        return swap_ctk
+    
+    def set_condition(self, args):
+        self.avg_weight = args.avg_weight
+        self.revise_back = args.revise_back
 
 
 @register_model

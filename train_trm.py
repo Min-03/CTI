@@ -166,6 +166,7 @@ if __name__ == '__main__':
     parser.add_argument("--set_dynamic_thre", action="store_true")
     parser.add_argument("--dynamic_fuse_overlap", action="store_true")
     parser.add_argument("--adaptive_fuse", action="store_true")
+    parser.add_argument("--revise_back", action="store_true")
     parser.add_argument("--W_init", default=[0.1, 1.0, 1.0], nargs='+', type=float)
     parser.add_argument("--noise_weight", type=float, default=-1.0)
     parser.add_argument("--contrast_idx", type=int, default=-1)
